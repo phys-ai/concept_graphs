@@ -19,6 +19,8 @@ import argparse
 from einops import rearrange, repeat, reduce, pack, unpack
 import math
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--lrate', default=1e-4, type=float)
@@ -321,8 +323,8 @@ class ContextUnet(nn.Module):
         self.contextembed1 = []
         self.contextembed2 = []
         for iclass in range(len(self.n_classes)):
-            self.contextembed1.append( EmbedFC(self.n_classes[iclass], n_out1).to("cuda:0") )
-            self.contextembed2.append( EmbedFC(self.n_classes[iclass], n_out2).to("cuda:0") )
+            self.contextembed1.append( EmbedFC(self.n_classes[iclass], n_out1).to(device) )
+            self.contextembed2.append( EmbedFC(self.n_classes[iclass], n_out2).to(device) )
 
 
         n_conv = 7
@@ -480,7 +482,7 @@ def train_mnist(args):
     dataset = args.dataset 
     num_samples = args.num_samples 
     pixel_size = args.pixel_size
-    if dataset=="celeba-2classes" or "fairface" in dataset:
+    if "celeba" in dataset or "fairface" in dataset:
         in_channels = 3
     else:
         in_channels = 4
@@ -508,12 +510,13 @@ def train_mnist(args):
     else:
         n_classes = [3,3,1]
 
-    if dataset=="celeba-2classes":
+    if "celeba" in dataset:
        tf = transforms.Compose([
              transforms.Resize((pixel_size,pixel_size)),
              transforms.ToTensor(),
              transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
            ])
+       n_classes = [2,2,2]
     else: 
        tf = transforms.Compose([transforms.Resize((pixel_size,pixel_size)), transforms.ToTensor()])
 
@@ -530,6 +533,7 @@ def train_mnist(args):
         ddpm.load_state_dict(torch.load(model_save_dir + f"model_"+str(int(n_epoch-1))+".pth", map_location=torch.device(device)))
 
     train_dataset = load_dataset.my_dataset(tf, num_samples, dataset, configs=configs["train"], training=True, alpha=alpha, remove_node=remove_node, flag_zipf=flag_zipf, flag_double=flag_double)
+    print(len(train_dataset))
     train_dataloader = DataLoader([train_dataset[isample] for isample in range(2500)], batch_size=batch_size, shuffle=True, num_workers=1)
     train_dataloader_online = DataLoader([train_dataset[isample] for isample in range(2500,num_samples)], batch_size=batch_size, shuffle=True, num_workers=1)
 

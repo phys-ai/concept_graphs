@@ -35,7 +35,8 @@ class my_dataset(Dataset):
             ratios = {0: beta**2, 1: beta, 2: beta**2}
             sum_ratio = ratios[0] + 3 * ratios[1] + 3 * ratios[2] 
 
-        if dataset=="celeba-2classes":
+        #if dataset=="celeba-2classes":
+        if "celeba" in dataset: 
             prefix = "celeba"
             ext = ".jpg"
         elif dataset=="fairface-3classes":
@@ -86,7 +87,7 @@ class my_dataset(Dataset):
            img = self.transform(img)
 
        name_labels = img_path.split("_")[-2]
-       if not (self.dataset=="celeba-2classes" or self.dataset=="fairface-3classes" ):
+       if not ("celeba" in self.dataset or self.dataset=="fairface-3classes" ):
            with open(img_path.replace(".png", ".json"), 'r') as f:
                my_dict = json.loads(f.read())
                if "single-body_2d_3classes" in self.dataset:
@@ -130,6 +131,8 @@ class my_dataset(Dataset):
            label = {0: int(name_labels[0]), 1: np.array(color, dtype=np.float32), 2: size, 3: np.array(position, dtype=np.float32)}
        elif "celeba-2classes" in self.dataset: 
            label = {0: int(name_labels[0]), 1: int(name_labels[1])}
+       elif "celeba-3classes" in self.dataset: 
+           label = {0: int(name_labels[0]), 1: int(name_labels[1]), 2: int(name_labels[2])}
        elif "fairface-3classes" in self.dataset: 
            label = {0: int(name_labels[0]), 1: int(name_labels[1]), 2: int(name_labels[2])}
        else:
