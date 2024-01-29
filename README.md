@@ -1,15 +1,14 @@
 # Compositional Abilities Emerge Multiplicatively: Exploring Diffusion Models on a Synthetic Task 
 
 ## Introduction
-This project is the code for the paper "Compositional Abilities Emerge Multiplicatively: Exploring Diffusion Models on a Synthetic Task" (NeurIPS 2023). 
-This code is Denoising Diffusion Probabilistic Models (DDPM) and is built using PyTorch. 
+This project is the codebase for the paper titled "Compositional Abilities Emerge Multiplicatively: Exploring Diffusion Models on a Synthetic Task," presented at NeurIPS 2023. The code implements Denoising Diffusion Probabilistic Models (DDPM) and is built using PyTorch.
 
 ## Paper
-**Title:** Compositional Abilities Emerge Multiplicatively: Exploring Diffusion Models on a Synthetic Task 
-**Authors:** Maya Okawa, Ekdeep Singh Lubana, Robert P. Dick, Hidenori Tanaka 
-**Venue:** NeurIPS 
-**Published:** 2023 
-**Link:** [arXiv link](https://arxiv.org/abs/2310.09336)
+- **Title:** Compositional Abilities Emerge Multiplicatively: Exploring Diffusion Models on a Synthetic Task 
+- **Authors:** Maya Okawa, Ekdeep Singh Lubana, Robert P. Dick, Hidenori Tanaka 
+- **Venue:** NeurIPS 
+- **Published:** 2023 
+- **Link:** [arXiv link](https://arxiv.org/abs/2310.09336)
 
 ## Installation
 - PyTorch
