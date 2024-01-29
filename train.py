@@ -12,11 +12,11 @@ import numpy as np
 import load_dataset
 import os
 import glob
-from PIL import Image
 import json
 import argparse
 from einops import rearrange, repeat, reduce, pack, unpack
 import math
+
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -72,7 +72,7 @@ class ResidualConvBlock(nn.Module):
                 out = x + x2
             else:
                 out = x1 + x2 
-            return out / 1.414
+            return out
         else:
             x1 = self.conv1(x)
             x2 = self.conv2(x1)
@@ -221,6 +221,7 @@ class Attention(nn.Module):
 
 
 
+# Define the U-Net downsampling and upsampling components
 class UnetDown(nn.Module):
     def __init__(self, in_channels, out_channels, flag_att):
         super(UnetDown, self).__init__()
@@ -385,8 +386,6 @@ def ddpm_schedules(beta1, beta2, T):
         "mab_over_sqrtmab": mab_over_sqrtmab_inv,  # (1-\alpha_t)/\sqrt{1-\bar{\alpha_t}}
     }
 
-def weighted_mse_loss(input, target, weight):
-    return torch.mean(weight * torch.mean((input - target) ** 2, (1,2,3)))
 
 class DDPM(nn.Module):
     def __init__(self, nn_model, betas, n_T, device, drop_prob=0.1, n_classes=None, flag_weight=0):
@@ -450,12 +449,11 @@ class DDPM(nn.Module):
         return x_i, x_i_store
 
 
-def train_mnist(args):
+def training(args):
 
     n_epoch = args.n_epoch 
     batch_size = args.batch_size 
     n_T = args.n_T 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     n_feat = args.n_feat 
     lrate = args.lrate 
     alpha = args.alpha
@@ -469,26 +467,24 @@ def train_mnist(args):
     n_sample = args.n_sample 
     flag_att = args.flag_att 
     remove_node = args.remove_node 
+    in_channels = 3 if "celeba" in dataset else 4
 
-    if "celeba" in dataset: in_channels = 3
-    else: in_channels = 4
 
     with open("config_category.json", 'r') as f:
          configs = json.load(f)[experiment]
 
 
-    print("### Number of samples", num_samples)
-    if experiment=="H42-train1": 
-        n_classes = [2,3,1,1]
-    elif experiment=="H22-train1": 
-        n_classes = [2,2]
-    else:
-        n_classes = [3,3,1]
+    experiment_classes = {
+        "H42-train1": [2, 3, 1, 1],
+        "H22-train1": [2, 2],
+        "default": [3, 3, 1]
+    }
+    n_classes = experiment_classes.get(experiment, experiment_classes["default"])
 
     if "celeba" in dataset:
-       n_classes = [2,2,2]
-    tf = transforms.Compose([transforms.Resize((pixel_size,pixel_size)), transforms.ToTensor()])
+        n_classes = [2,2,2]
 
+    tf = transforms.Compose([transforms.Resize((pixel_size,pixel_size)), transforms.ToTensor()])
 
 
     save_dir = './output/'+dataset+'/'+experiment+'/'
@@ -496,7 +492,8 @@ def train_mnist(args):
     save_dir = save_dir + str(num_samples)+"_"+str(test_size)+"_"+str(n_feat)+"_"+str(n_T)+"_"+str(n_epoch)+"_"+str(lrate)+"_"+remove_node+"_"+str(alpha)+"_"+str(beta)+"_"+str(flag_att)+"/"
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
 
-    ddpm = DDPM(nn_model=ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, flag_att=flag_att), betas=(1e-4, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
+    ddpm = DDPM(nn_model=ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, flag_att=flag_att), 
+                                     betas=(1e-4, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
     ddpm.to(device)
 
 
@@ -507,8 +504,8 @@ def train_mnist(args):
     test_dataloaders = {}
     log_dict = {'train_loss_per_batch': [],
                 'test_loss_per_batch': {key: [] for key in configs["test"]}}
-    _configs = list(set(configs["test"] + configs["train"])) 
-    for config in _configs: 
+    output_configs = list(set(configs["test"] + configs["train"])) 
+    for config in output_configs: 
         test_dataset = load_dataset.my_dataset(tf, n_sample, dataset, configs=config, training=False, test_size=test_size) 
         test_dataloaders[config] = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=1)
 
@@ -550,15 +547,14 @@ def train_mnist(args):
                     log_dict['test_loss_per_batch'][test_config].append(test_loss.item())
 
         if save_model==0 and (ep + 1) % 10 == 0: 
-            _configs = list(set(configs["test"] + configs["train"])) 
-            for test_config in _configs: 
+            for test_config in output_configs: 
                 x_real, c_gen = next(iter(test_dataloaders[test_config]))
                 x_real = x_real[:n_sample].to(device)
                 x_gen, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, pixel_size, pixel_size), device, guide_w=0.0)
                 np.savez_compressed(save_dir + f"image_"+test_config+"_ep"+str(ep)+".npz", x_gen=x_gen.detach().cpu().numpy()) 
                 print('saved image at ' + save_dir + f"image_"+test_config+"_ep"+str(ep)+".png")
 
-                if ep == int(n_epoch-1): 
+                if ep + 1 == n_epoch: 
                     np.savez_compressed(save_dir + f"gen_store_"+test_config+"_ep"+str(ep)+".npz", x_gen_store=x_gen_store)
                     print('saved image file at ' + save_dir + f"gen_store_"+test_config+"_ep"+str(ep)+".npz")
 
@@ -571,6 +567,6 @@ def train_mnist(args):
 
 if __name__ == "__main__":
     args = parser.parse_args()
+    training(args)
 
-    train_mnist(args)
 

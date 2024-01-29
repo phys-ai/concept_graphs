@@ -6,7 +6,7 @@ This project is the codebase for the paper titled "Compositional Abilities Emerg
 ## Paper
 - **Title:** Compositional Abilities Emerge Multiplicatively: Exploring Diffusion Models on a Synthetic Task 
 - **Authors:** Maya Okawa, Ekdeep Singh Lubana, Robert P. Dick, Hidenori Tanaka 
-- **Venue:** NeurIPS 
+- **Venue:** Advances in Neural Information Processing Systems (NeurIPS)
 - **Published:** 2023 
 - **Link:** [arXiv link](https://arxiv.org/abs/2310.09336)
 
@@ -15,7 +15,6 @@ This project is the codebase for the paper titled "Compositional Abilities Emerg
 - torchvision
 - numpy
 - matplotlib
-- PIL
 - tqdm
 - einops
 
@@ -25,15 +24,15 @@ You can download the datasets required for this project:
 
 - **Synthetic Data:**  
   The synthetic data for this project can be downloaded from the following link:  
-  [Download Synthetic Data](#add-your-link-here)
+  [Download Synthetic Data](https://www.dropbox.com/scl/fi/6zzb5h4bly2gbignwn4yz/single-body_2d_3classes.zip?rlkey=0uizen48trsl6cm4oaui2ze41&dl=0)
 
-- **Preprocessed Data:**  
+- **Real Data:**  
   The preprocessed CelebA data for this project can be downloaded from the following link:  
-  [Download Preprocessed Data](#add-your-link-here)
+  [Download Preprocessed Data](https://www.dropbox.com/scl/fi/kikre4mhv3iipzxuytbrb/celeba-3classes-10000.zip?rlkey=4gllwowbxs6vers9abcoraz5g&dl=0)
 
 
 ## Usage
-First, create an "input/" directory at the root level of this project. Then, place the data files under the "input" directory.
+First, create an `input` directory at the root level of this project. Then, place the data files under the `input` directory.
 
 To train the model with the synthetic data, run the `train.py` script with the desired parameters. For example:
 

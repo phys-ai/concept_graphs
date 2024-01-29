@@ -17,32 +17,29 @@ class my_dataset(Dataset):
     def __init__(self, transform=None, num_samples=5000, dataset="", configs="", training=True, test_size=None, alpha=1.0, beta=2.0, remove_node=None, flag_double=1):
         self.training = training
         self.test_size = test_size
-
         self.dataset = dataset
 
-        if "celeba" in dataset: 
-            prefix = "celeba"
-            ext = ".jpg"
-        else:
-            prefix = "CLEVR"
-            ext = ".png"
+        prefix = "celeba" if "celeba" in dataset else "CLEVR"
+        ext = ".jpg" if prefix == "celeba" else ".png"
+        
         if training:
             self.train_image_paths = []
             for config in configs:
-                if config=="000" and alpha!=1500 and remove_node!="100": 
-                    new_paths = glob.glob("input/"+dataset+"/train_"+remove_node+"/"+prefix+"_000_*"+ext)
+                if config == "000" and alpha != 1500 and remove_node != "100":  
+                    path_pattern = f"input/{dataset}/train_{remove_node}/{prefix}_000_*{ext}" 
                 else: 
-                   new_paths = glob.glob("working/"+dataset+"/train/"+prefix+"_"+config+"_*"+ext)
-                if remove_node==config: 
+                    path_pattern = f"working/{dataset}/train/{prefix}_{config}_*{ext}"
+                new_paths = glob.glob(path_pattern)
+        
+                if remove_node == config:
                     new_paths = new_paths[:alpha]
-                self.train_image_paths += new_paths
+        
+                self.train_image_paths.extend(new_paths)
+            self.len_data = len(self.train_image_paths)
         else:
-            self.test_image_paths = glob.glob("input/"+dataset+"/test/"+prefix+"_"+configs+"_*"+ext)
+            self.test_image_paths = glob.glob(f"input/{dataset}/test/{prefix}_{configs}_*{ext}")
+            self.len_data = len(self.test_image_paths)
 
-        if self.training: 
-           self.len_data = len(self.train_image_paths) - 1
-        else:
-           self.len_data = len(self.test_image_paths) - 1
 
         self.num_samples = num_samples
         self.transform = transform
@@ -59,30 +56,38 @@ class my_dataset(Dataset):
        img = Image.open(img_path) #.convert('RGB')
        if self.transform is not None:
            img = self.transform(img)
-
+   
        name_labels = img_path.split("_")[-2]
-       if self.dataset=="single-body_2d_3classes": 
+       
+       if self.dataset == "single-body_2d_3classes":
            with open(img_path.replace(".png", ".json"), 'r') as f:
                my_dict = json.loads(f.read())
                _size = my_dict[0]
                _color = my_dict[1][:3]
-
+       
            if self.training:
-               size = _size
-               color = _color
+               size, color = _size, _color
            else:
-              if int(name_labels[2])==0: size = 2.6
-              if int(name_labels[2])==1: size = self.test_size
-              if int(name_labels[1])==0: color = [ 0.9 , 0.1 , 0.1 ] 
-              if int(name_labels[1])==1: color = [ 0.1 , 0.1 , 0.9 ] 
-              if int(name_labels[1])==2: color = [ 0.1 , 0.9 , 0.1 ] 
+               # Define colors mapping
+               colors_map = {
+                   '0': [0.9, 0.1, 0.1],
+                   '1': [0.1, 0.1, 0.9],
+                   '2': [0.1, 0.9, 0.1]
+               }
+               # Assign size and color based on label values
+               size = 2.6 if int(name_labels[2]) == 0 else self.test_size
+               color = colors_map[name_labels[1]]
+       
+           # Convert size and color to numpy arrays
            size = np.array(size, dtype=np.float32)
            color = np.array(color, dtype=np.float32)
-
-       if self.dataset=="single-body_2d_3classes": 
+       
+           # Create the label dictionary
            label = {0: int(name_labels[0]), 1: color, 2: size}
-       elif "celeba-3classes" in self.dataset: 
-           label = {0: int(name_labels[0]), 1: int(name_labels[1]), 2: int(name_labels[2])}
+       
+       elif "celeba" in self.dataset:
+           label = {i: int(name_labels[i]) for i in range(3)}
+
 
        return img, label 
 
