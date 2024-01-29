@@ -1,4 +1,3 @@
-from typing import Dict, Tuple
 from tqdm import tqdm
 import torch
 import torch.nn as nn
@@ -35,15 +34,8 @@ parser.add_argument('--n_sample', default=64, type=int)
 parser.add_argument('--n_epoch', default=100, type=int)
 parser.add_argument('--experiment', default="H32-train1", type=str)
 parser.add_argument('--remove_node', default="010", type=str)
-parser.add_argument('--flag_concat', default=2, type=str) #, action=argparse.BooleanOptionalAction)
-parser.add_argument('--flag_eval', default=1, type=int)
-parser.add_argument('--flag_online', default=1, type=int)
-parser.add_argument('--flag_zipf', default=2, type=int)
 parser.add_argument('--flag_att', default=1, type=int)
-parser.add_argument('--flag_double', default=1, type=int)
 parser.add_argument('--pixel_size', default=28, type=int)
-#parser.add_argument('--n_class_size', default=1, type=int)
-#parser.add_argument('--n_class_color', default=1, type=int)
 parser.add_argument('--save_model', default=1, type=int)
 parser.add_argument('--dataset', default="single-body_2d_3classes", type=str)
 
@@ -253,7 +245,7 @@ class UnetUp(nn.Module):
         process and upscale the image feature maps
         '''
         attention = nn.Identity()
-        if flag_att==0:  
+        if flag_att==0: 
             create_self_attn = lambda dim: RearrangeToSequence(Residual(Attention(dim)))
             attention = create_self_attn(out_channels)
         layers = [
@@ -290,7 +282,7 @@ class EmbedFC(nn.Module):
 
 
 class ContextUnet(nn.Module):
-    def __init__(self, in_channels, n_feat = 256, n_classes=10, flag_concat=0, dataset="", flag_att=1):
+    def __init__(self, in_channels, n_feat = 256, n_classes=10, dataset="", flag_att=1):
         super(ContextUnet, self).__init__()
 
         self.in_channels = in_channels
@@ -310,21 +302,14 @@ class ContextUnet(nn.Module):
 
         ### embedding shape
         self.dataset = dataset
-        self.flag_concat = flag_concat
-        if flag_concat==1: 
-            n_out1 = int(2*n_feat/self.n_contexts)
-            n_out2 = int(n_feat/self.n_contexts)
-        else:
-            n_out1 = 2*n_feat
-            n_out2 = n_feat
-        self.n_out1 = n_out1
-        self.n_out2 = n_out2
+        self.n_out1 = 2*n_feat 
+        self.n_out2 = n_feat
 
         self.contextembed1 = []
         self.contextembed2 = []
         for iclass in range(len(self.n_classes)):
-            self.contextembed1.append( EmbedFC(self.n_classes[iclass], n_out1).to(device) )
-            self.contextembed2.append( EmbedFC(self.n_classes[iclass], n_out2).to(device) )
+            self.contextembed1.append( EmbedFC(self.n_classes[iclass], self.n_out1).to(device) )
+            self.contextembed2.append( EmbedFC(self.n_classes[iclass], self.n_out2).to(device) )
 
 
         n_conv = 7
@@ -409,8 +394,6 @@ class DDPM(nn.Module):
         self.nn_model = nn_model.to(device)
         self.n_classes = n_classes
 
-        # register_buffer allows accessing dictionary produced by ddpm_schedules
-        # e.g. can access self.sqrtab later
         for k, v in ddpm_schedules(betas[0], betas[1], n_T).items():
             self.register_buffer(k, v)
 
@@ -482,25 +465,17 @@ def train_mnist(args):
     dataset = args.dataset 
     num_samples = args.num_samples 
     pixel_size = args.pixel_size
-    if "celeba" in dataset or "fairface" in dataset:
-        in_channels = 3
-    else:
-        in_channels = 4
     experiment = args.experiment 
     n_sample = args.n_sample 
-    if n_sample > batch_size: 
-        n_sample = batch_size
-    flag_eval = args.flag_eval 
-    flag_online = args.flag_online 
     flag_att = args.flag_att 
-    flag_double = args.flag_double 
-    flag_zipf = args.flag_zipf 
     remove_node = args.remove_node 
-    #n_class_size = args.n_class_size
-    #n_class_color = args.n_class_color
+
+    if "celeba" in dataset: in_channels = 3
+    else: in_channels = 4
 
     with open("config_category.json", 'r') as f:
          configs = json.load(f)[experiment]
+
 
     print("### Number of samples", num_samples)
     if experiment=="H42-train1": 
@@ -511,31 +486,22 @@ def train_mnist(args):
         n_classes = [3,3,1]
 
     if "celeba" in dataset:
-       tf = transforms.Compose([
-             transforms.Resize((pixel_size,pixel_size)),
-             transforms.ToTensor(),
-             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-           ])
        n_classes = [2,2,2]
-    else: 
-       tf = transforms.Compose([transforms.Resize((pixel_size,pixel_size)), transforms.ToTensor()])
+    tf = transforms.Compose([transforms.Resize((pixel_size,pixel_size)), transforms.ToTensor()])
+
+
 
     save_dir = './output/'+dataset+'/'+experiment+'/'
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
-    save_dir = save_dir + str(num_samples)+"_"+str(test_size)+"_"+str(n_feat)+"_"+str(n_T)+"_"+str(n_epoch)+"_"+str(lrate)+"_"+remove_node+"_"+str(alpha)+"_"+str(beta)+"_"+str(flag_att)+"_"+str(flag_double)+"_"+str(flag_zipf)+"_"+str(flag_online)+"/"
+    save_dir = save_dir + str(num_samples)+"_"+str(test_size)+"_"+str(n_feat)+"_"+str(n_T)+"_"+str(n_epoch)+"_"+str(lrate)+"_"+remove_node+"_"+str(alpha)+"_"+str(beta)+"_"+str(flag_att)+"/"
     if not os.path.isdir(save_dir): os.makedirs(save_dir)
 
     ddpm = DDPM(nn_model=ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, flag_att=flag_att), betas=(1e-4, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
     ddpm.to(device)
 
-    # optionally load a model
-    if flag_eval==0: 
-        ddpm.load_state_dict(torch.load(model_save_dir + f"model_"+str(int(n_epoch-1))+".pth", map_location=torch.device(device)))
 
-    train_dataset = load_dataset.my_dataset(tf, num_samples, dataset, configs=configs["train"], training=True, alpha=alpha, remove_node=remove_node, flag_zipf=flag_zipf, flag_double=flag_double)
-    print(len(train_dataset))
-    train_dataloader = DataLoader([train_dataset[isample] for isample in range(2500)], batch_size=batch_size, shuffle=True, num_workers=1)
-    train_dataloader_online = DataLoader([train_dataset[isample] for isample in range(2500,num_samples)], batch_size=batch_size, shuffle=True, num_workers=1)
+    train_dataset = load_dataset.my_dataset(tf, num_samples, dataset, configs=configs["train"], training=True, alpha=alpha, remove_node=remove_node)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=1)
 
 
     test_dataloaders = {}
@@ -551,75 +517,57 @@ def train_mnist(args):
     for ep in range(n_epoch):
         print(f'epoch {ep}')
 
-        if not flag_eval==0: 
-            ddpm.train()
+        ddpm.train()
 
-            # linear lrate decay
-            optim.param_groups[0]['lr'] = lrate*(1-ep/n_epoch)
+        # linear lrate decay
+        optim.param_groups[0]['lr'] = lrate*(1-ep/n_epoch)
 
-            loss_ema = None
-            pbar = tqdm(train_dataloader)
-            for x, c in pbar:
-                optim.zero_grad()
-                x = x.to(device)
-                _c = [tmpc.to(device) for tmpc in c.values()]
-                loss = ddpm(x, _c)
-                log_dict['train_loss_per_batch'].append(loss.item())
-                loss.backward()
-                if loss_ema is None:
-                    loss_ema = loss.item()
-                else:
-                    loss_ema = 0.95 * loss_ema + 0.05 * loss.item()
-                pbar.set_description(f"loss: {loss_ema:.4f}")
-                optim.step()
+        loss_ema = None
+        pbar = tqdm(train_dataloader)
+        for x, c in pbar:
+            optim.zero_grad()
+            x = x.to(device)
+            _c = [tmpc.to(device) for tmpc in c.values()]
+            loss = ddpm(x, _c)
+            log_dict['train_loss_per_batch'].append(loss.item())
+            loss.backward()
+            if loss_ema is None:
+                loss_ema = loss.item()
+            else:
+                loss_ema = 0.95 * loss_ema + 0.05 * loss.item()
+            pbar.set_description(f"loss: {loss_ema:.4f}")
+            optim.step()
         
-            if flag_online==0: 
-                optim.zero_grad()
-                x, c = next(iter(train_dataloader_online))
-                x = x.to(device)
-                _c = [tmpc.to(device) for tmpc in c.values()]
-                loss = ddpm(x, _c)
-                log_dict['train_loss_per_batch'].append(loss.item())
-                loss.backward()
-                if loss_ema is None:
-                    loss_ema = loss.item()
-                else:
-                    loss_ema = 0.95 * loss_ema + 0.05 * loss.item()
-                optim.step()
-
 
         ddpm.eval()
         with torch.no_grad():
 
-            if not flag_eval==0: 
-                for test_config in configs["test"]: 
-                    for test_x, test_c in test_dataloaders[test_config]:
-                        test_x = test_x.to(device)
-                        _test_c = [tmptest_c.to(device) for tmptest_c in test_c.values()]
-                        test_loss = ddpm(test_x, _test_c)
-                        log_dict['test_loss_per_batch'][test_config].append(test_loss.item())
+            for test_config in configs["test"]: 
+                for test_x, test_c in test_dataloaders[test_config]:
+                    test_x = test_x.to(device)
+                    _test_c = [tmptest_c.to(device) for tmptest_c in test_c.values()]
+                    test_loss = ddpm(test_x, _test_c)
+                    log_dict['test_loss_per_batch'][test_config].append(test_loss.item())
 
-            if (save_model==0 and ep % 1==0) or (ep >= int(n_epoch-1)) or (ep % 100==99): 
-                _configs = list(set(configs["test"] + configs["train"])) 
-                for test_config in _configs: 
-                    x_real, c_gen = next(iter(test_dataloaders[test_config]))
-                    x_real = x_real[:n_sample].to(device)
-                    x_gen, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, pixel_size, pixel_size), device, guide_w=0.0)
-                    np.savez_compressed(save_dir + f"image_"+test_config+"_ep"+str(ep)+".npz", x_gen=x_gen.detach().cpu().numpy()) 
-                    print('saved image at ' + save_dir + f"image_"+test_config+"_ep"+str(ep)+".png")
+        if save_model==0 and (ep + 1) % 10 == 0: 
+            _configs = list(set(configs["test"] + configs["train"])) 
+            for test_config in _configs: 
+                x_real, c_gen = next(iter(test_dataloaders[test_config]))
+                x_real = x_real[:n_sample].to(device)
+                x_gen, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, pixel_size, pixel_size), device, guide_w=0.0)
+                np.savez_compressed(save_dir + f"image_"+test_config+"_ep"+str(ep)+".npz", x_gen=x_gen.detach().cpu().numpy()) 
+                print('saved image at ' + save_dir + f"image_"+test_config+"_ep"+str(ep)+".png")
 
-                    if ep == int(n_epoch-1): 
-                        np.savez_compressed(save_dir + f"gen_store_"+test_config+"_ep"+str(ep)+".npz", x_gen_store=x_gen_store)
-                        print('saved image file at ' + save_dir + f"gen_store_"+test_config+"_ep"+str(ep)+".npz")
+                if ep == int(n_epoch-1): 
+                    np.savez_compressed(save_dir + f"gen_store_"+test_config+"_ep"+str(ep)+".npz", x_gen_store=x_gen_store)
+                    print('saved image file at ' + save_dir + f"gen_store_"+test_config+"_ep"+str(ep)+".npz")
 
 
         if ep == int(n_epoch-1):
             with open(save_dir + f"training_log_"+str(ep)+".json", "w") as outfile:
                 json.dump(log_dict, outfile)
 
-            #if not flag_eval==0: 
-            #    torch.save(ddpm.state_dict(), model_save_dir + f"model_{ep}.pth")
-            #    print('saved model at ' + model_save_dir + f"model_{ep}.pth")
+
 
 if __name__ == "__main__":
     args = parser.parse_args()
