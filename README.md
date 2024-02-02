@@ -42,8 +42,14 @@ To train the model using the CelebA dataset:
 
 `python train.py --dataset celeba-3classes-10000`
 
+
 ## Structure
 - `train.py`: Main script for training the DDPM model.
 - `load_dataset.py`: Script for loading and processing datasets.
+
+
+## References
+- The `DDPM` class in `train.py` is based on the implementation found at [TeaPearce/Conditional_Diffusion_MNIST](https://github.com/TeaPearce/Conditional_Diffusion_MNIST/blob/main/script.py).
+- The `CrossAttention` class in `train.py` is inspired by the code in [Animadversio/DiffusionFromScratch/StableDiff_UNet_model.py](https://github.com/Animadversio/DiffusionFromScratch/blob/master/StableDiff_UNet_model.py).
 
 
