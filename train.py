@@ -1,287 +1,625 @@
-import torch.multiprocessing as mp
-if mp.get_start_method(allow_none=True) is None:
-    mp.set_start_method('spawn', force=True)  # or 'forkserver'
-
-import argparse
-import os
-import time
-from IPython import embed
-
-import matplotlib.pyplot as plt
+from tqdm import tqdm
 import torch
-from torchvision.transforms import transforms
-
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torchvision import models, transforms
+from torchvision.datasets import MNIST, ImageFolder
+from torchvision.utils import save_image, make_grid
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
 import numpy as np
-import common_args
-import random
-from dataset import Dataset, ImageDataset
-from net import Transformer, ImageTransformer
-from utils import (
-    build_darkroom_data_filename,
-    build_darkroom_model_filename,
-)
+import load_dataset
+import os
+import glob
+import json
+import argparse
+from einops import rearrange, repeat, reduce, pack, unpack
+import math
+
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-if __name__ == '__main__':
-    if not os.path.exists('figs/loss'):
-        os.makedirs('figs/loss', exist_ok=True)
-    if not os.path.exists('models'):
-        os.makedirs('models', exist_ok=True)
-
-    parser = argparse.ArgumentParser()
-    common_args.add_dataset_args(parser)
-    common_args.add_model_args(parser)
-    common_args.add_train_args(parser)
-
-    parser.add_argument('--seed', type=int, default=0)
-
-    args = vars(parser.parse_args())
-    print("Args: ", args)
-
-    env = args['env']
-    n_envs = args['envs']
-    n_hists = args['hists']
-    n_samples = args['samples']
-    horizon = args['H']
-    dim = args['dim']
-    state_dim = dim
-    action_dim = dim
-    n_embd = args['embd']
-    n_head = args['head']
-    n_layer = args['layer']
-    lr = args['lr']
-    shuffle = args['shuffle']
-    dropout = args['dropout']
-    var = args['var']
-    cov = args['cov']
-    test_ratio = args['test_ratio']
-    num_epochs = args['num_epochs']
-    seed = args['seed']
-    rollin_type = args['rollin_type']
-    
-    tmp_seed = seed
-    if seed == -1:
-        tmp_seed = 0
-
-
-    torch.manual_seed(tmp_seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(tmp_seed)
-        torch.cuda.manual_seed_all(tmp_seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    np.random.seed(tmp_seed)
-    random.seed(tmp_seed)
+parser = argparse.ArgumentParser()
+parser.add_argument('--lrate', default=1e-4, type=float)
+parser.add_argument('--test_size', default=1.4, type=float)
+parser.add_argument('--alpha', default=1500, type=int)
+parser.add_argument('--beta', default=2.0, type=float)
+parser.add_argument('--num_samples', default=5000, type=int)
+parser.add_argument('--batch_size', default=64, type=int)
+parser.add_argument('--n_T', default=500, type=int)
+parser.add_argument('--n_feat', default=256, type=int)
+parser.add_argument('--n_sample', default=64, type=int)
+parser.add_argument('--n_epoch', default=100, type=int)
+parser.add_argument('--experiment', default="H32-train1", type=str)
+parser.add_argument('--remove_node', default="010", type=str)
+parser.add_argument('--type_attention', default="self", type=str)
+parser.add_argument('--pixel_size', default=28, type=int)
+parser.add_argument('--save_model', default=1, type=int)
+parser.add_argument('--dataset', default="single-body_2d_3classes", type=str)
 
 
 
-    dataset_config = {
-        'n_hists': n_hists,
-        'n_samples': n_samples,
-        'horizon': horizon,
-        'dim': dim,
-        'rollin_type': rollin_type, 
-        'test_ratio': test_ratio,
+
+class ResidualConvBlock(nn.Module):
+    def __init__(
+        self, in_channels: int, out_channels: int, is_res: bool = False
+    ) -> None:
+        super().__init__()
+        '''
+        standard ResNet style convolutional block
+        '''
+        self.same_channels = in_channels==out_channels
+        self.is_res = is_res
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, 1, 1),
+            nn.BatchNorm2d(out_channels),
+            nn.GELU(),
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, 3, 1, 1),
+            nn.BatchNorm2d(out_channels),
+            nn.GELU(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.is_res:
+            x1 = self.conv1(x)
+            x2 = self.conv2(x1)
+            # this adds on correct residual in experiment channels have increased
+            if self.same_channels:
+                out = x + x2
+            else:
+                out = x1 + x2 
+            return out
+        else:
+            x1 = self.conv1(x)
+            x2 = self.conv2(x1)
+            return x2
+
+
+def l2norm(t):
+    return F.normalize(t, dim = -1)
+
+def exists(val):
+    return val is not None
+
+class Residual(nn.Module):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def forward(self, x, **kwargs):
+        return self.fn(x, **kwargs) + x
+
+class RearrangeToSequence(nn.Module):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def forward(self, x):
+        x = rearrange(x, 'b c ... -> b ... c')
+        x, ps = pack([x], 'b * c')
+
+        x = self.fn(x)
+
+        x, = unpack(x, ps, 'b * c')
+        x = rearrange(x, 'b ... c -> b c ...')
+        return x
+
+class LayerNorm(nn.Module):
+    def __init__(self, dim, eps = 1e-5, fp16_eps = 1e-3, stable = False):
+        super().__init__()
+        self.eps = eps
+        self.fp16_eps = fp16_eps
+        self.stable = stable
+        self.g = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        eps = self.eps if x.dtype == torch.float32 else self.fp16_eps
+
+        if self.stable:
+            x = x / x.amax(dim = -1, keepdim = True).detach()
+
+        var = torch.var(x, dim = -1, unbiased = False, keepdim = True)
+        mean = torch.mean(x, dim = -1, keepdim = True)
+        return (x - mean) * (var + eps).rsqrt() * self.g
+
+
+class Attention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        dim_head = 64,
+        heads = 8,
+        dropout = 0.,
+        causal = False,
+        rotary_emb = None,
+        cosine_sim = True,
+        cosine_sim_scale = 16
+    ):
+        super().__init__()
+        self.scale = cosine_sim_scale if cosine_sim else (dim_head ** -0.5)
+        self.cosine_sim = cosine_sim
+
+        self.heads = heads
+        inner_dim = dim_head * heads
+
+        self.causal = causal
+        self.norm = LayerNorm(dim)
+        self.dropout = nn.Dropout(dropout)
+
+        self.null_kv = nn.Parameter(torch.randn(2, dim_head))
+        self.to_q = nn.Linear(dim, inner_dim, bias = False)
+        self.to_kv = nn.Linear(dim, dim_head * 2, bias = False)
+
+        self.rotary_emb = rotary_emb
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim, bias = False),
+            LayerNorm(dim)
+        )
+
+    def forward(self, x, mask = None, attn_bias = None):
+        print(x.shape)
+        b, n, device = *x.shape[:2], x.device
+
+        x = self.norm(x)
+        q, k, v = (self.to_q(x), *self.to_kv(x).chunk(2, dim = -1))
+
+        q = rearrange(q, 'b n (h d) -> b h n d', h = self.heads)
+        q = q * self.scale
+
+        # rotary embeddings
+        if exists(self.rotary_emb):
+            q, k = map(self.rotary_emb.rotate_queries_or_keys, (q, k))
+
+        # add null key / value for classifier free guidance in prior net
+        nk, nv = map(lambda t: repeat(t, 'd -> b 1 d', b = b), self.null_kv.unbind(dim = -2))
+        k = torch.cat((nk, k), dim = -2)
+        v = torch.cat((nv, v), dim = -2)
+
+        # whether to use cosine sim
+        if self.cosine_sim:
+            q, k = map(l2norm, (q, k))
+
+        q, k = map(lambda t: t * math.sqrt(self.scale), (q, k))
+
+        # calculate query / key similarities
+        sim = torch.einsum('b h i d, b j d -> b h i j', q, k)
+
+        # relative positional encoding (T5 style)
+
+        if exists(attn_bias):
+            sim = sim + attn_bias
+
+        # masking
+        max_neg_value = -torch.finfo(sim.dtype).max
+
+        if exists(mask):
+            mask = F.pad(mask, (1, 0), value = True)
+            mask = rearrange(mask, 'b j -> b 1 1 j')
+            sim = sim.masked_fill(~mask, max_neg_value)
+
+        if self.causal:
+            i, j = sim.shape[-2:]
+            causal_mask = torch.ones((i, j), dtype = torch.bool, device = device).triu(j - i + 1)
+            sim = sim.masked_fill(causal_mask, max_neg_value)
+
+        # attention
+        attn = sim.softmax(dim = -1, dtype = torch.float32)
+        attn = attn.type(sim.dtype)
+
+        attn = self.dropout(attn)
+
+        # aggregate values
+        out = torch.einsum('b h i j, b j d -> b h i d', attn, v)
+
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
+
+# Self and Cross Attention mechanism (Checked)
+class CrossAttention(nn.Module):
+    """General implementation of Cross & Self Attention multi-head
+    """
+    def __init__(self, embed_dim, hidden_dim, context_dim=None, num_heads=8, ):
+        super(CrossAttention, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.context_dim = context_dim
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.to_q = nn.Linear(hidden_dim, embed_dim, bias=False)
+        if context_dim is None:
+            # Self Attention
+            self.to_k = nn.Linear(hidden_dim, embed_dim, bias=False)
+            self.to_v = nn.Linear(hidden_dim, embed_dim, bias=False)
+            self.self_attn = True
+        else:
+            # Cross Attention
+            self.to_k = nn.Linear(context_dim, embed_dim, bias=False)
+            self.to_v = nn.Linear(context_dim, embed_dim, bias=False)
+            self.self_attn = False
+        self.to_out = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim, bias=True)
+        )  # this could be omitted
+
+    def forward(self, tokens, context=None):
+        Q = self.to_q(tokens)
+        K = self.to_k(tokens) if self.self_attn else self.to_k(context)
+        V = self.to_v(tokens) if self.self_attn else self.to_v(context)
+        # print(Q.shape, K.shape, V.shape)
+        # transform heads onto batch dimension
+        Q = rearrange(Q, 'B T (H D) -> (B H) T D', H=self.num_heads, D=self.head_dim)
+        K = rearrange(K, 'B T (H D) -> (B H) T D', H=self.num_heads, D=self.head_dim)
+        V = rearrange(V, 'B T (H D) -> (B H) T D', H=self.num_heads, D=self.head_dim)
+        # print(Q.shape, K.shape, V.shape)
+        scoremats = torch.einsum("BTD,BSD->BTS", Q, K)
+        attnmats = F.softmax(scoremats / math.sqrt(self.head_dim), dim=-1)
+        # print(scoremats.shape, attnmats.shape, )
+        ctx_vecs = torch.einsum("BTS,BSD->BTD", attnmats, V)
+        # split the heads transform back to hidden.
+        ctx_vecs = rearrange(ctx_vecs, '(B H) T D -> B T (H D)', H=self.num_heads, D=self.head_dim)
+        # TODO: note this `to_out` is also a linear layer, could be in principle merged into the to_value layer.
+        return self.to_out(ctx_vecs)
+
+
+
+# Define the U-Net downsampling and upsampling components
+class UnetDown(nn.Module):
+    def __init__(self, in_channels, out_channels, type_attention):
+        super(UnetDown, self).__init__()
+        '''
+        process and downscale the image feature maps
+        '''
+        layers = [ResidualConvBlock(in_channels, out_channels), nn.MaxPool2d(2)]
+        attention = nn.Identity()
+        if type_attention=='self':  
+            create_self_attn = lambda dim: RearrangeToSequence(Residual(Attention(dim)))
+            attention = create_self_attn(out_channels)
+        if type_attention=='cross':  
+            create_self_attn = lambda dim: RearrangeToSequence(Residual(CrossAttention(dim, dim)))
+            attention = create_self_attn(out_channels)
+        self.model = nn.Sequential(*[ResidualConvBlock(in_channels, out_channels), attention, nn.MaxPool2d(2)])
+
+    def forward(self, x):
+        return self.model(x)
+
+
+class UnetUp(nn.Module):
+    def __init__(self, in_channels, out_channels, type_attention):
+        super(UnetUp, self).__init__()
+        '''
+        process and upscale the image feature maps
+        '''
+        attention = nn.Identity()
+        if type_attention=="self": 
+            create_self_attn = lambda dim: RearrangeToSequence(Residual(Attention(dim)))
+            attention = create_self_attn(out_channels)
+        if type_attention=="cross": 
+            create_self_attn = lambda dim: RearrangeToSequence(Residual(CrossAttention(dim, dim)))
+            attention = create_self_attn(out_channels)
+        layers = [
+            nn.ConvTranspose2d(in_channels, out_channels, 2, 2),
+            ResidualConvBlock(out_channels, out_channels),
+            attention, 
+            ResidualConvBlock(out_channels, out_channels),
+        ]
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, x, skip):
+        x = torch.cat((x, skip), 1)
+        x = self.model(x)
+        return x
+
+
+class EmbedFC(nn.Module):
+    def __init__(self, input_dim, emb_dim):
+        super(EmbedFC, self).__init__()
+        '''
+        generic one layer FC NN for embedding things  
+        '''
+        self.input_dim = input_dim
+        layers = [
+            nn.Linear(input_dim, emb_dim),
+            nn.GELU(),
+            nn.Linear(emb_dim, emb_dim),
+        ]
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = x.view(-1, self.input_dim)
+        return self.model(x)
+
+
+class ContextUnet(nn.Module):
+    def __init__(self, in_channels, n_feat = 256, n_classes=10, dataset="", type_attention=1):
+        super(ContextUnet, self).__init__()
+
+        self.in_channels = in_channels
+        self.n_contexts = len(n_classes)
+        self.n_feat = 2 * n_feat
+        self.n_classes = n_classes
+
+        self.init_conv = ResidualConvBlock(in_channels, n_feat, is_res=True)
+
+        self.down1 = UnetDown(n_feat, n_feat, type_attention)
+        self.down2 = UnetDown(n_feat, 2 * n_feat, type_attention)
+
+        self.to_vec = nn.Sequential(nn.AvgPool2d(7), nn.GELU())
+
+        self.timeembed1 = EmbedFC(1, 2*n_feat)
+        self.timeembed2 = EmbedFC(1, 1*n_feat)
+
+        ### embedding shape
+        self.dataset = dataset
+        self.n_out1 = 2*n_feat 
+        self.n_out2 = n_feat
+
+        self.contextembed1 = []
+        self.contextembed2 = []
+        for iclass in range(len(self.n_classes)):
+            self.contextembed1.append( EmbedFC(self.n_classes[iclass], self.n_out1).to(device) )
+            self.contextembed2.append( EmbedFC(self.n_classes[iclass], self.n_out2).to(device) )
+
+
+        n_conv = 7
+        self.up0 = nn.Sequential(
+            nn.ConvTranspose2d(2 * n_feat, 2 * n_feat, n_conv, n_conv), 
+            nn.GroupNorm(8, 2 * n_feat),
+            nn.ReLU(),
+        )
+
+        self.up1 = UnetUp(4 * n_feat, n_feat, type_attention)
+        self.up2 = UnetUp(2 * n_feat, n_feat, type_attention)
+        self.out = nn.Sequential(
+            nn.Conv2d(2 * n_feat, n_feat, 3, 1, 1),
+            nn.GroupNorm(8, n_feat),
+            nn.ReLU(),
+            nn.Conv2d(n_feat, self.in_channels, 3, 1, 1),
+        )
+
+    def forward(self, x, c, t, context_mask):
+        # x is (noisy) image, c is context label, t is timestep, 
+
+        x = self.init_conv(x)
+        down1 = self.down1(x)
+        down2 = self.down2(down1)
+        hiddenvec = self.to_vec(down2)
+
+        temb1 = self.timeembed1(t).view(-1, int(self.n_feat), 1, 1)
+        temb2 = self.timeembed2(t).view(-1, int(self.n_feat/2), 1, 1)
+
+        # embed context, time step
+        cemb1 = 0
+        cemb2 = 0
+        for ic in range(len(self.n_classes)):
+            tmpc = c[ic]
+            if tmpc.dtype==torch.int64: 
+                tmpc = nn.functional.one_hot(tmpc, num_classes=self.n_classes[ic]).type(torch.float)
+            cemb1 += self.contextembed1[ic](tmpc).view(-1, int(self.n_out1/1.), 1, 1)
+            cemb2 += self.contextembed2[ic](tmpc).view(-1, int(self.n_out2/1.), 1, 1)
+
+
+        up1 = self.up0(hiddenvec)
+        up2 = self.up1(cemb1*up1 + temb1, down2)
+        up3 = self.up2(cemb2*up2+ temb2, down1)
+        out = self.out(torch.cat((up3, x), 1))
+        return out
+
+
+def ddpm_schedules(beta1, beta2, T):
+    """
+    Returns pre-computed schedules for DDPM sampling, training process.
+    """
+    assert beta1 < beta2 < 1.0, "beta1 and beta2 must be in (0, 1)"
+
+    beta_t = (beta2 - beta1) * torch.arange(0, T + 1, dtype=torch.float32) / T + beta1
+    sqrt_beta_t = torch.sqrt(beta_t)
+    alpha_t = 1 - beta_t
+    log_alpha_t = torch.log(alpha_t)
+    alphabar_t = torch.cumsum(log_alpha_t, dim=0).exp()
+
+    sqrtab = torch.sqrt(alphabar_t)
+    oneover_sqrta = 1 / torch.sqrt(alpha_t)
+
+    sqrtmab = torch.sqrt(1 - alphabar_t)
+    mab_over_sqrtmab_inv = (1 - alpha_t) / sqrtmab
+
+    return {
+        "alpha_t": alpha_t,  # \alpha_t
+        "oneover_sqrta": oneover_sqrta,  # 1/\sqrt{\alpha_t}
+        "sqrt_beta_t": sqrt_beta_t,  # \sqrt{\beta_t}
+        "alphabar_t": alphabar_t,  # \bar{\alpha_t}
+        "sqrtab": sqrtab,  # \sqrt{\bar{\alpha_t}}
+        "sqrtmab": sqrtmab,  # \sqrt{1-\bar{\alpha_t}}
+        "mab_over_sqrtmab": mab_over_sqrtmab_inv,  # (1-\alpha_t)/\sqrt{1-\bar{\alpha_t}}
     }
-    model_config = {
-        'shuffle': shuffle,
-        'lr': lr,
-        'dropout': dropout,
-        'n_embd': n_embd,
-        'n_layer': n_layer,
-        'n_head': n_head,
-        'n_envs': n_envs,
-        'n_hists': n_hists,
-        'n_samples': n_samples,
-        'horizon': horizon,
-        'dim': dim,
-        'test_ratio': test_ratio,
-        'rollin_type': rollin_type, 
-        'seed': seed,
-    }
-    if env.startswith('darkroom') or env.startswith('binarytree'):
-        state_dim = 1 #dim * dim #2
-        if env.startswith('binarytree'): 
-            action_dim = 4
-        else: 
-            action_dim = 5
 
-        #dataset_config.update({'rollin_type': 'uniform'})
-        path_train = build_darkroom_data_filename(
-            env, n_envs, dataset_config, mode=0)
-        path_test = build_darkroom_data_filename(
-            env, n_envs, dataset_config, mode=1)
 
-        filename = build_darkroom_model_filename(env, model_config)
+class DDPM(nn.Module):
+    def __init__(self, nn_model, betas, n_T, device, drop_prob=0.1, n_classes=None, flag_weight=0):
+        super(DDPM, self).__init__()
+        self.nn_model = nn_model.to(device)
+        self.n_classes = n_classes
 
-    elif env.startswith('memory'):
-        state_dim = 1 #dim * dim #2
-        action_dim = 5
+        for k, v in ddpm_schedules(betas[0], betas[1], n_T).items():
+            self.register_buffer(k, v)
 
-        #dataset_config.update({'rollin_type': 'uniform'})
-        path_train = build_darkroom_data_filename(
-            env, n_envs, dataset_config, mode=0)
-        path_test = build_darkroom_data_filename(
-            env, n_envs, dataset_config, mode=1)
+        self.n_T = n_T
+        self.device = device
+        self.flag_weight = flag_weight
+        self.drop_prob = drop_prob
+        self.loss_mse = nn.MSELoss()
 
-        filename = build_darkroom_model_filename(env, model_config)
-
-    else:
-        raise NotImplementedError
-    if env.startswith('binarytree'): 
-        num_states = 2 ** dim - 1 # Number of nodes in a binary tree
-    else: 
-        num_states = dim * dim
-
-    config = {
-        'horizon': horizon,
-        'state_dim': state_dim,
-        'num_states': num_states,
-        'action_dim': action_dim,
-        'n_layer': n_layer,
-        'n_embd': n_embd,
-        'n_head': n_head,
-        'shuffle': shuffle,
-        'dropout': dropout,
-        'test': False,
-        'store_gpu': True,
-    }
-    if env == 'miniworld':
-        config.update({'image_size': 25, 'store_gpu': False})
-        model = ImageTransformer(config).to(device)
-    else:
-        model = Transformer(config).to(device)
-
-    params = {
-        'batch_size': 64,
-        'shuffle': True,
-    }
-
-    log_filename = f'figs/loss/{filename}_logs.txt'
-    with open(log_filename, 'w') as f:
-        pass
-    def printw(string):
+    def forward(self, x, c):
         """
-        A drop-in replacement for print that also writes to a log file.
+        this method is used in training, so samples t and noise randomly
         """
-        # Use the standard print function to print to the console
-        print(string)
 
-        # Write the same output to the log file
-        with open(log_filename, 'a') as f:
-            print(string, file=f)
+        _ts = torch.randint(1, self.n_T+1, (x.shape[0],)).to(self.device)  # t ~ Uniform(0, n_T)
+        noise = torch.randn_like(x)  # eps ~ N(0, 1)
 
+        x_t = (
+            self.sqrtab[_ts, None, None, None] * x
+            + self.sqrtmab[_ts, None, None, None] * noise
+        )  
 
+        # dropout context with some probability
+        context_mask = torch.bernoulli(torch.zeros_like(c[0])+self.drop_prob).to(self.device)
+        
+        return self.loss_mse(noise, self.nn_model(x_t, c, _ts / self.n_T, context_mask))
 
-    if env == 'miniworld':
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
-        ])
+    def sample(self, n_sample, c_gen, size, device, guide_w = 0.0):
 
+        x_i = torch.randn(n_sample, *size).to(device)  # x_T ~ N(0, 1), sample initial noise
+         
+        _c_gen = [tmpc_gen[:n_sample].to(device) for tmpc_gen in c_gen.values()] 
 
+        context_mask = torch.zeros_like(_c_gen[0]).to(device)
 
-        params.update({'num_workers': 16,
-                'prefetch_factor': 2,
-                'persistent_workers': True,
-                'pin_memory': True,
-                'batch_size': 64,
-                'worker_init_fn': worker_init_fn,
-            })
+        x_i_store = [] 
+        print()
+        for i in range(self.n_T, 0, -1):
+            print(f'sampling timestep {i}',end='\r')
+            t_is = torch.tensor([i / self.n_T]).to(device)
+            t_is = t_is.repeat(n_sample,1,1,1)
 
+            z = torch.randn(n_sample, *size).to(device) if i > 1 else 0
 
-        printw("Loading miniworld data...")
-        train_dataset = ImageDataset(paths_train, config, transform)
-        test_dataset = ImageDataset(paths_test, config, transform)
-        printw("Done loading miniworld data")
-    else:
-        train_dataset = Dataset(path_train, config)
-        test_dataset = Dataset(path_test, config)
-
-    train_loader = torch.utils.data.DataLoader(train_dataset, **params)
-    test_loader = torch.utils.data.DataLoader(test_dataset, **params)
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
-
-    test_loss = []
-    train_loss = []
-
-    printw("Num train batches: " + str(len(train_loader)))
-    printw("Num test batches: " + str(len(test_loader)))
-
-    for epoch in range(num_epochs):
-        # EVALUATION
-        printw(f"Epoch: {epoch + 1}")
-        start_time = time.time()
-        with torch.no_grad():
-            epoch_test_loss = 0.0
-            for i, batch in enumerate(test_loader):
-                print(f"Batch {i} of {len(test_loader)}", end='\r')
-                batch = {k: v.to(device) for k, v in batch.items()}
-                true_actions = batch['optimal_actions']
-                pred_actions = model(batch)
-                true_actions = true_actions.unsqueeze(
-                    1).repeat(1, pred_actions.shape[1], 1)
-                true_actions = true_actions.reshape(-1, action_dim)
-                pred_actions = pred_actions.reshape(-1, action_dim)
-
-                loss = loss_fn(pred_actions, true_actions)
-                epoch_test_loss += loss.item() / horizon
-
-        test_loss.append(epoch_test_loss / len(test_dataset))
-        end_time = time.time()
-        printw(f"\tTest loss: {test_loss[-1]}")
-        printw(f"\tEval time: {end_time - start_time}")
+            eps = self.nn_model(x_i, _c_gen, t_is, context_mask)
+            x_i = (
+                self.oneover_sqrta[i] * (x_i - eps * self.mab_over_sqrtmab[i])
+                + self.sqrt_beta_t[i] * z
+            )
+            if i%20==0:
+                x_i_store.append(x_i.detach().cpu().numpy())
+        
+        x_i_store = np.array(x_i_store)
+        return x_i, x_i_store
 
 
-        # TRAINING
-        epoch_train_loss = 0.0
-        start_time = time.time()
+def training(args):
 
-        for i, batch in enumerate(train_loader):
-            print(f"Batch {i} of {len(train_loader)}", end='\r')
-            batch = {k: v.to(device) for k, v in batch.items()}
-            true_actions = batch['optimal_actions']
-            pred_actions = model(batch)
-            true_actions = true_actions.unsqueeze(
-                1).repeat(1, pred_actions.shape[1], 1)
-            true_actions = true_actions.reshape(-1, action_dim)
-            pred_actions = pred_actions.reshape(-1, action_dim)
+    n_epoch = args.n_epoch 
+    batch_size = args.batch_size 
+    n_T = args.n_T 
+    n_feat = args.n_feat 
+    lrate = args.lrate 
+    alpha = args.alpha
+    beta = args.beta
+    test_size = args.test_size
+    save_model = args.save_model 
+    dataset = args.dataset 
+    num_samples = args.num_samples 
+    pixel_size = args.pixel_size
+    experiment = args.experiment 
+    n_sample = args.n_sample 
+    type_attention = args.type_attention 
+    remove_node = args.remove_node 
+    in_channels = 3 if "celeba" in dataset else 4
 
-            optimizer.zero_grad()
-            loss = loss_fn(pred_actions, true_actions)
+
+    with open("config_category.json", 'r') as f:
+         configs = json.load(f)[experiment]
+
+
+    experiment_classes = {
+        "H42-train1": [2, 3, 1, 1],
+        "H22-train1": [2, 2],
+        "default": [3, 3, 1]
+    }
+    n_classes = experiment_classes.get(experiment, experiment_classes["default"])
+
+    if "celeba" in dataset:
+        n_classes = [2,2,2]
+
+    tf = transforms.Compose([transforms.Resize((pixel_size,pixel_size)), transforms.ToTensor()])
+
+
+    save_dir = './output/'+dataset+'/'+experiment+'/'
+    if not os.path.isdir(save_dir): os.makedirs(save_dir)
+    save_dir = save_dir + str(num_samples)+"_"+str(test_size)+"_"+str(n_feat)+"_"+str(n_T)+"_"+str(n_epoch)+"_"+str(lrate)+"_"+remove_node+"_"+str(alpha)+"_"+str(beta)+"_"+str(type_attention)+"/"
+    if not os.path.isdir(save_dir): os.makedirs(save_dir)
+
+    ddpm = DDPM(nn_model=ContextUnet(in_channels=in_channels, n_feat=n_feat, n_classes=n_classes, dataset=dataset, type_attention=type_attention), 
+                                     betas=(1e-4, 0.02), n_T=n_T, device=device, drop_prob=0.1, n_classes=n_classes)
+    ddpm.to(device)
+
+
+    train_dataset = load_dataset.my_dataset(tf, num_samples, dataset, configs=configs["train"], training=True, alpha=alpha, remove_node=remove_node)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=1)
+
+
+    test_dataloaders = {}
+    log_dict = {'train_loss_per_batch': [],
+                'test_loss_per_batch': {key: [] for key in configs["test"]}}
+    output_configs = list(set(configs["test"] + configs["train"])) 
+    for config in output_configs: 
+        test_dataset = load_dataset.my_dataset(tf, n_sample, dataset, configs=config, training=False, test_size=test_size) 
+        test_dataloaders[config] = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=1)
+
+    optim = torch.optim.Adam(ddpm.parameters(), lr=lrate)
+
+    for ep in range(n_epoch):
+        print(f'epoch {ep}')
+
+        ddpm.train()
+
+        # linear lrate decay
+        optim.param_groups[0]['lr'] = lrate*(1-ep/n_epoch)
+
+        loss_ema = None
+        pbar = tqdm(train_dataloader)
+        for x, c in pbar:
+            optim.zero_grad()
+            x = x.to(device)
+            _c = [tmpc.to(device) for tmpc in c.values()]
+            loss = ddpm(x, _c)
+            log_dict['train_loss_per_batch'].append(loss.item())
             loss.backward()
-            optimizer.step()
-            epoch_train_loss += loss.item() / horizon
+            if loss_ema is None:
+                loss_ema = loss.item()
+            else:
+                loss_ema = 0.95 * loss_ema + 0.05 * loss.item()
+            pbar.set_description(f"loss: {loss_ema:.4f}")
+            optim.step()
+        
 
-        train_loss.append(epoch_train_loss / len(train_dataset))
-        end_time = time.time()
-        printw(f"\tTrain loss: {train_loss[-1]}")
-        printw(f"\tTrain time: {end_time - start_time}")
+        ddpm.eval()
+        with torch.no_grad():
+
+            for test_config in configs["test"]: 
+                for test_x, test_c in test_dataloaders[test_config]:
+                    test_x = test_x.to(device)
+                    _test_c = [tmptest_c.to(device) for tmptest_c in test_c.values()]
+                    test_loss = ddpm(test_x, _test_c)
+                    log_dict['test_loss_per_batch'][test_config].append(test_loss.item())
+
+        if save_model==0 and (ep + 1) % 10 == 0: 
+            for test_config in output_configs: 
+                x_real, c_gen = next(iter(test_dataloaders[test_config]))
+                x_real = x_real[:n_sample].to(device)
+                x_gen, x_gen_store = ddpm.sample(n_sample, c_gen, (in_channels, pixel_size, pixel_size), device, guide_w=0.0)
+                np.savez_compressed(save_dir + f"image_"+test_config+"_ep"+str(ep)+".npz", x_gen=x_gen.detach().cpu().numpy()) 
+                print('saved image at ' + save_dir + f"image_"+test_config+"_ep"+str(ep)+".png")
+
+                if ep + 1 == n_epoch: 
+                    np.savez_compressed(save_dir + f"gen_store_"+test_config+"_ep"+str(ep)+".npz", x_gen_store=x_gen_store)
+                    print('saved image file at ' + save_dir + f"gen_store_"+test_config+"_ep"+str(ep)+".npz")
 
 
-        # LOGGING
-        if (epoch + 1) % 50 == 0:
-            torch.save(model.state_dict(),
-                       f'models/{filename}_epoch{epoch+1}.pt')
+        if ep == int(n_epoch-1):
+            with open(save_dir + f"training_log_"+str(ep)+".json", "w") as outfile:
+                json.dump(log_dict, outfile)
 
-        # PLOTTING
-        if (epoch + 1) % 10 == 0:
-            printw(f"Epoch: {epoch + 1}")
-            printw(f"Test Loss:        {test_loss[-1]}")
-            printw(f"Train Loss:       {train_loss[-1]}")
-            printw("\n")
 
-            #plt.yscale('log')
-            plt.plot(train_loss[1:], label="Train Loss")
-            plt.plot(test_loss[1:], label="Test Loss")
-            plt.legend()
-            plt.savefig(f"figs/loss/{filename}_train_loss.png")
-            plt.clf()
 
-    torch.save(model.state_dict(), f'models/{filename}.pt')
-    print("Done.")
+if __name__ == "__main__":
+    args = parser.parse_args()
+    training(args)
+
+
