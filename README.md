@@ -36,11 +36,11 @@ First, create an `input` directory at the root level of this project. Then, plac
 
 To train the model with the synthetic data, run the `train.py` script with the desired parameters. For example:
 
-`python train.py --dataset single-body_2d_3classes`
+`python3 train.py --dataset single-body_2d_3classes`
 
 To train the model using the CelebA dataset:
 
-`python train.py --dataset celeba-3classes-10000`
+`python3 train.py --dataset celeba-3classes-10000`
 
 
 ## Structure
