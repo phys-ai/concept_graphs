@@ -28,7 +28,7 @@ You can download the datasets required for this project:
 
 - **Real Data:**  
   The preprocessed CelebA data for this project can be downloaded from the following link:  
-  [Download Preprocessed Data](https://www.dropbox.com/scl/fi/kikre4mhv3iipzxuytbrb/celeba-3classes-10000.zip?rlkey=4gllwowbxs6vers9abcoraz5g&dl=0)
+  [Download Preprocessed Data](https://www.dropbox.com/scl/fi/j8vwioyhmecibqeglxlok/celeba-3classes-smiling-10000_100.zip?rlkey=grz1de7psug5tlm89h5l7w7ia&dl=0)
 
 
 ## Usage
