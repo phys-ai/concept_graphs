@@ -24,7 +24,7 @@ You can download the datasets required for this project:
 
 - **Synthetic Data:**  
   The synthetic data for this project can be downloaded from the following link:  
-  [Download Synthetic Data](https://www.dropbox.com/scl/fi/6zzb5h4bly2gbignwn4yz/single-body_2d_3classes.zip?rlkey=0uizen48trsl6cm4oaui2ze41&dl=0)
+  [Download Synthetic Data](https://www.dropbox.com/scl/fi/6zzb5h4bly2gbignwn4yz/single-body_2d_3classes.zip?rlkey=0uizen48trsl6cm4oaui2ze41&dl=0) 
 
 - **Real Data:**  
   The preprocessed CelebA data for this project can be downloaded from the following link:  
